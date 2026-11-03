@@ -1,0 +1,247 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>NearBite</title>
+    <link
+      rel="stylesheet"
+      href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
+    />
+    <style>
+      body {
+        margin: 0;
+        font-family: system-ui, sans-serif;
+        display: flex;
+        height: 100vh;
+      }
+      #side {
+        width: 340px;
+        padding: 12px;
+        overflow-y: auto;
+        box-sizing: border-box;
+        border-right: 1px solid #ddd;
+      }
+      #map {
+        flex: 1;
+      }
+      h1 {
+        font-size: 20px;
+        margin: 0 0 8px;
+      }
+      label {
+        display: block;
+        font-size: 12px;
+        margin-top: 8px;
+        color: #555;
+      }
+      input,
+      select,
+      button {
+        width: 100%;
+        padding: 6px;
+        box-sizing: border-box;
+        margin-top: 2px;
+      }
+      .item {
+        padding: 8px;
+        border-bottom: 1px solid #eee;
+        cursor: pointer;
+      }
+      .item:hover {
+        background: #f5f5f5;
+      }
+      .meta {
+        font-size: 12px;
+        color: #666;
+      }
+      #pager {
+        display: flex;
+        gap: 8px;
+        align-items: center;
+        margin-top: 8px;
+      }
+      #pager button {
+        width: auto;
+      }
+      @media (max-width: 700px) {
+        body {
+          flex-direction: column-reverse;
+        }
+        #side {
+          width: 100%;
+          height: 50%;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <div id="side">
+      <h1>NearBite</h1>
+      <div class="meta">Click the map to set your location.</div>
+
+      <label>Search (name or dish)</label>
+      <input id="q" placeholder="e.g. dosa (leave empty for nearby)" />
+
+      <label>Radius: <span id="rv">3</span> km</label>
+      <input id="radius" type="range" min="1" max="20" value="3" />
+
+      <label>Category</label>
+      <select id="category">
+        <option value="">All</option>
+        <option>cafe</option>
+        <option>restaurant</option>
+        <option>bakery</option>
+        <option>street-food</option>
+        <option>juice-bar</option>
+      </select>
+
+      <label>Minimum rating</label>
+      <select id="minRating">
+        <option value="0">Any</option>
+        <option>3</option>
+        <option>4</option>
+        <option>4.5</option>
+      </select>
+
+      <label>Sort by</label>
+      <select id="sort">
+        <option value="distance">Distance</option>
+        <option value="rating">Rating</option>
+        <option value="reviews">Most reviewed</option>
+      </select>
+
+      <button id="go" style="margin-top: 10px">Search</button>
+      <div id="summary" class="meta" style="margin-top: 8px"></div>
+      <div id="list"></div>
+      <div id="pager">
+        <button id="prev">Prev</button><span id="pg"></span
+        ><button id="next">Next</button>
+      </div>
+    </div>
+    <div id="map"></div>
+
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+    <script>
+      const $ = (id) => document.getElementById(id);
+      const esc = (s) =>
+        String(s ?? "").replace(
+          /[&<>"']/g,
+          (c) =>
+            ({
+              "&": "&amp;",
+              "<": "&lt;",
+              ">": "&gt;",
+              '"': "&quot;",
+              "'": "&#39;",
+            })[c],
+        );
+
+      const map = L.map("map").setView([12.9279, 77.6046], 13);
+      L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", {
+        attribution: "&copy; OpenStreetMap contributors",
+      }).addTo(map);
+
+      let center = { lat: 12.9279, lng: 77.6046 };
+      let page = 1,
+        totalPages = 1;
+      const youMarker = L.marker([center.lat, center.lng])
+        .addTo(map)
+        .bindPopup("You are here");
+      let circle = L.circle([center.lat, center.lng], { radius: 3000 }).addTo(
+        map,
+      );
+      const markers = L.layerGroup().addTo(map);
+      const byId = {};
+
+      map.on("click", (e) => {
+        center = e.latlng;
+        youMarker.setLatLng(center);
+        page = 1;
+        load();
+      });
+
+      async function load() {
+        const radiusKm = Number($("radius").value);
+        circle.setLatLng(center).setRadius(radiusKm * 1000);
+
+        const params = new URLSearchParams({
+          lng: center.lng,
+          lat: center.lat,
+          radius: radiusKm * 1000,
+          category: $("category").value,
+          minRating: $("minRating").value,
+          sort: $("sort").value,
+          page,
+          limit: 10,
+        });
+        const q = $("q").value.trim();
+        let url;
+        if (q) {
+          params.set("q", q);
+          url = "/places/search?" + params;
+        } else {
+          url = "/places/nearby?" + params;
+        }
+        if (!params.get("category")) params.delete("category");
+
+        const res = await fetch(url);
+        const data = await res.json();
+        if (!res.ok) {
+          $("summary").textContent = data.error || "Error";
+          return;
+        }
+
+        totalPages = data.totalPages || 1;
+        $("summary").textContent = `${data.total} places found`;
+        $("pg").textContent = `Page ${data.page} of ${totalPages}`;
+
+        markers.clearLayers();
+        $("list").innerHTML = "";
+        data.results.forEach((p) => {
+          const [lng, lat] = p.location.coordinates;
+          const dist =
+            p.distanceMeters != null
+              ? ` · ${(p.distanceMeters / 1000).toFixed(2)} km`
+              : "";
+          const m = L.marker([lat, lng])
+            .addTo(markers)
+            .bindPopup(
+              `<b>${esc(p.name)}</b><br>${esc(p.category)} · ⭐ ${esc(p.rating)} (${esc(p.reviewCount || 0)})${dist}`,
+            );
+          byId[p._id] = m;
+
+          const div = document.createElement("div");
+          div.className = "item";
+          div.innerHTML = `<b>${esc(p.name)}</b><div class="meta">${esc(p.category)} · ⭐ ${esc(p.rating)}${dist}</div>`;
+          div.onclick = () => {
+            map.setView([lat, lng], 16);
+            m.openPopup();
+          };
+          $("list").appendChild(div);
+        });
+      }
+
+      $("go").onclick = () => {
+        page = 1;
+        load();
+      };
+      $("radius").oninput = () => {
+        $("rv").textContent = $("radius").value;
+      };
+      $("prev").onclick = () => {
+        if (page > 1) {
+          page--;
+          load();
+        }
+      };
+      $("next").onclick = () => {
+        if (page < totalPages) {
+          page++;
+          load();
+        }
+      };
+      load();
+    </script>
+  </body>
+</html>
